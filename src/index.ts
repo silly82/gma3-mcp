@@ -5,6 +5,7 @@ import { z } from "zod";
 import { Gma3Bridge, BridgeError, BridgeUnreachableError } from "./bridge.js";
 import { OscSender } from "./osc.js";
 import { KeystrokeSender } from "./keystroke.js";
+import { recordTools, startHttpApi } from "./http.js";
 import { helpDir, helpVersion, listHelpPages, lookupHelp } from "./help.js";
 import { CHEATSHEET } from "./cheatsheet.js";
 import { MutationLock } from "./mutations.js";
@@ -72,6 +73,9 @@ const server = new McpServer(
     ),
   },
 );
+
+// The HTTP API (docs/http-api.md) serves the same tool handlers: record every registration from here on.
+const registeredTools = recordTools(server);
 
 // Arbitrary Lua execution is a separately gated capability. The console-side switch (the plugin's
 // "lua" start argument, off by default) is the enforcement point; GMA3_ALLOW_LUA=0 additionally hides
@@ -714,10 +718,38 @@ server.registerResource(
 
 // ---------------------------------------------------------------------------
 
+/** GMA3_HTTP_PORT starts the HTTP API; GMA3_TRANSPORT=http serves only it (a standalone service, no stdio). */
+async function startHttp(): Promise<boolean> {
+  if (env.GMA3_HTTP_PORT === undefined) return false;
+  const api = await startHttpApi({
+    tools: registeredTools,
+    bridge,
+    token: env.GMA3_HTTP_TOKEN ?? "",
+    host: env.GMA3_HTTP_HOST,
+    port: Number(env.GMA3_HTTP_PORT),
+    allow: env.GMA3_HTTP_TOOLS?.split(",").map((t) => t.trim()).filter(Boolean),
+    allowNetwork: env.GMA3_HTTP_ALLOW_NETWORK === "1",
+    eventsMs: env.GMA3_HTTP_EVENTS_MS === undefined ? undefined : Number(env.GMA3_HTTP_EVENTS_MS),
+  });
+  console.error(`gma3-mcp HTTP API on http://${api.address.host}:${api.address.port}/api (docs/http-api.md)`);
+  return true;
+}
+
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(`gma3-mcp started (bridge ${bridge.description}, osc ${osc.description}, gma3_lua tool ${allowLuaTool ? "registered" : "disabled by GMA3_ALLOW_LUA"})`);
+  const httpOnly = env.GMA3_TRANSPORT === "http";
+  if (httpOnly && env.GMA3_HTTP_PORT === undefined) throw new Error("GMA3_TRANSPORT=http needs GMA3_HTTP_PORT (and GMA3_HTTP_TOKEN)");
+  if (!httpOnly) {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
+  try {
+    await startHttp();
+  } catch (err) {
+    // With MCP on stdio a bad HTTP setting must not take the MCP server down; alone it is fatal.
+    if (httpOnly) throw err;
+    console.error(`gma3-mcp HTTP API not started: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  console.error(`gma3-mcp started (bridge ${bridge.description}, osc ${osc.description}, gma3_lua tool ${allowLuaTool ? "registered" : "disabled by GMA3_ALLOW_LUA"}${httpOnly ? ", HTTP only" : ""})`);
   if (startupBuild.state !== "current") {
     console.error(`gma3-mcp build ${startupBuild.state}: ${startupBuild.reason}${startupBuild.action ? `; ${startupBuild.action}` : ""}`);
   }
