@@ -2760,7 +2760,8 @@ end
 --   * HookObjectChange(fn, obj, plugin) takes the Plugin object (its component answers nil) and allows one hook per
 --     callback function (a second hook with the same function answers -1), so every hook gets its own closure.
 --     change 10 = the object's children changed (store or delete in a pool, Store Cue in a sequence, a preset
---     stored), 11 = the object itself changed (Label). Playback, programmer and selection fire nothing.
+--     stored), 11 = the object itself changed (Label), 6 = the hooked object was deleted. Playback, programmer and
+--     selection fire nothing.
 -- MCPX (declared next to state, since ops.ping uses it) is one local so the main chunk stays below Lua's
 -- local-variable limit.
 
@@ -2837,7 +2838,7 @@ end
 -- Change log: a ring of the last RING entries with increasing seq numbers; clients read it with changes.since
 -- or receive it pushed ({"event":"changes",...} lines without an id) after changes.watch.
 local CHANGE_RING, CHANGE_HOOKS_MAX = 256, 600
-local CHANGE_NAMES = { [10] = "children", [11] = "object" }
+local CHANGE_NAMES = { [6] = "deleted", [10] = "children", [11] = "object" }  -- 6: seen when a hooked sequence was deleted
 
 local function changeState()
   local ch = state.changes
