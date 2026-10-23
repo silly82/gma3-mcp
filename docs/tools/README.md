@@ -48,6 +48,9 @@ Tags (SU-21, bridge 0.36.0): `gma3_tags`, `gma3_store_tag`, `gma3_delete_tag`, `
 Saving and loading the show (SU-20, bridge 0.35.0, loading 0.45.0; `exclusive: true`, another show's file needs
 `overwrite: true`): `gma3_show_files`, `gma3_save_show`, `gma3_load_show` ([show.md](show.md)).
 
+Show-data changes (bridge 0.46.0, read-only): `gma3_changes`, what was stored, deleted or relabelled since a cursor,
+with a long poll; also pushed as `event: changes` on the HTTP events stream ([changes.md](changes.md)).
+
 Fixture-type data (SU-19, bridge 0.34.0): `cellOrder` and `wheels` in `gma3_patch_type_structure`
 ([patch.md](patch.md#cell-order-su-19)); `order: "dmx"` in `gma3_layout_cells`; `{cells_of, order}` in group lists.
 

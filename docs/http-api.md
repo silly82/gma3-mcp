@@ -37,7 +37,7 @@ serialised against each other (as with any two clients of the bridge).
 | `GET /api/status` | `{ bridge: { connected, show, bridgeVersion, instance, user } }` (or `connected: false` and the error) |
 | `GET /api/tools` | `{ count, tools: [{ name, title, description, parameters }] }`: the tools this API serves |
 | `POST /api/tools/<name>` | The body is the tool's arguments as a JSON object (empty body: `{}`). 200 with `{ isError, result }`: `result` is the tool's JSON result (the same text MCP returns), `isError` the MCP error flag |
-| `GET /api/events` | `text/event-stream`: an `event: state` with `data: { bridge, executors }` at once and on every change. `executors`: the assigned executors of the current page (`number`, `name`, `fader`, `active`, `cue`) |
+| `GET /api/events` | `text/event-stream`: an `event: state` with `data: { bridge, executors }` at once and on every change. `executors`: the assigned executors of the current page (`number`, `name`, `fader`, `active`, `cue`). With bridge 0.46.0 also an `event: changes` for every show-data change the bridge pushes ([below](#show-data-changes)) |
 
 Errors before a tool runs: 401 (token), 400 (body not a JSON object, or the tool's input validation), 403 (not served:
 `GMA3_HTTP_TOOLS`), 404 (no such tool or path), 405 (not POST). A tool that refuses or fails answers 200 with
@@ -45,6 +45,30 @@ Errors before a tool runs: 401 (token), 400 (body not a JSON object, or the tool
 
 Browsers' `EventSource` cannot set headers: `/api/events?token=<token>` (and every other path) also accepts the token
 as a query parameter. It then appears in logs and history: prefer the header where the client allows it.
+
+## Show-data changes
+
+While someone listens on `/api/events`, the server asks the bridge to watch the show data (`changes.watch`, bridge
+0.46.0) and forwards every pushed batch as it comes (the bridge sends at most 10 per second):
+
+```
+event: changes
+data: {"event":"changes","instance":"…","cursor":42,"changes":[{"seq":42,"kind":"pool","key":"pool:Groups","name":"Front","no":3,"what":"children","change":10,"count":1,"t":1234.5}],"missed":false}
+```
+
+- `kind` is `pool` (a data pool pool), `presetPool` or `sequence`; `what` is `children` (a store or delete in a pool, a
+  stored preset, a Store Cue in a sequence) or `object` (a label or another property of the hooked object); `count`
+  is how often one object changed in a burst.
+- `instance` names the bridge start; `cursor` restarts at 1 after a restart. `missed: true` means entries were dropped
+  from the bridge's ring (256) before they were sent: re-read what you show.
+- The watch belongs to the server's bridge connection and is renewed after a reconnect and when `ping` names another
+  instance; when the last listener leaves it ends (`changes.unwatch`).
+- Playback, the programmer and the selection fire no change: the `state` events (executors) cover playback.
+- An older bridge answers `unknown op`: then only `state` events are sent, and the server asks again when the bridge
+  instance changes (plugin updated).
+
+To catch up after a gap, call `gma3_changes` with the last `cursor` and `instance` (see
+[tools/changes.md](tools/changes.md)).
 
 ## Examples
 
@@ -83,7 +107,7 @@ client node on `/api/events` for live state.
 ## Limits
 
 - The events stream polls (one `ping` and one `gma3_executors` per interval, shared by all listeners, only while
-  someone listens). Push from the bridge is a planned extension.
+  someone listens). Show-data changes are pushed by the bridge (0.46.0); playback state is still polled.
 - The API does not add checks of its own beyond the token and the allowlist: what a tool allows over MCP, it allows
   over HTTP. Restrict `GMA3_HTTP_TOOLS` for an automation that only needs a few tools (e.g.
   `gma3_status,gma3_sequences,gma3_playback`).

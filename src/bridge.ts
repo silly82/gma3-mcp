@@ -23,6 +23,15 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * A line the bridge pushes without a request id (since bridge 0.46.0): `{"event":"changes",...}` after
+ * changes.watch. Listeners get the parsed line as it came.
+ */
+export interface BridgeEvent {
+  event: string;
+  [key: string]: unknown;
+}
+
 export class BridgeError extends Error {
   /**
    * True when the request was already written to the bridge before the failure
@@ -68,6 +77,9 @@ export class Gma3Bridge {
   private pending = new Map<string, Pending>();
   private nextId = 1;
   private lastError: string | null = null;
+  private eventListeners = new Set<(ev: BridgeEvent) => void>();
+  private connectListeners = new Set<(n: number) => void>();
+  private connections = 0;
 
   constructor(private readonly opts: BridgeOptions) {}
 
@@ -86,6 +98,36 @@ export class Gma3Bridge {
 
   get lastErrorMessage(): string | null {
     return this.lastError;
+  }
+
+  /**
+   * How many connections this client has established so far (1 after the first connect). A per-connection
+   * subscription on the bridge (changes.watch) is gone once this number moves on.
+   */
+  get connectionCount(): number {
+    return this.connections;
+  }
+
+  /** Called with every pushed line (no id, an `event` field). Returns the unsubscribe function. */
+  onEvent(fn: (ev: BridgeEvent) => void): () => void {
+    this.eventListeners.add(fn);
+    return () => void this.eventListeners.delete(fn);
+  }
+
+  /** Called with the new connectionCount each time a connection is established. Returns the unsubscribe function. */
+  onConnect(fn: (connection: number) => void): () => void {
+    this.connectListeners.add(fn);
+    return () => void this.connectListeners.delete(fn);
+  }
+
+  private notify<T>(listeners: Set<(v: T) => void>, value: T): void {
+    for (const fn of [...listeners]) {
+      try {
+        fn(value);
+      } catch {
+        /* a listener's failure is its own */
+      }
+    }
   }
 
   async connect(): Promise<void> {
@@ -123,6 +165,8 @@ export class Gma3Bridge {
         sock.on("close", () => {
           if (current()) this.handleClose();
         });
+        this.connections++;
+        this.notify(this.connectListeners, this.connections);
         resolve();
       });
     }).finally(() => {
@@ -164,7 +208,10 @@ export class Gma3Bridge {
         continue;
       }
       const id = msg?.id !== undefined && msg?.id !== null ? String(msg.id) : null;
-      if (!id) continue;
+      if (!id) {
+        if (msg && typeof msg === "object" && typeof msg.event === "string") this.notify(this.eventListeners, msg as BridgeEvent);
+        continue;
+      }
       const p = this.pending.get(id);
       if (!p) continue;
       this.pending.delete(id);

@@ -6,7 +6,8 @@
  *   GET  /api/status          the bridge (ping): connected, show, bridge version and instance
  *   GET  /api/tools           the tools this API serves: name, title, description
  *   POST /api/tools/<name>    call a tool; the JSON body is its arguments; the answer is { isError, result }
- *   GET  /api/events          text/event-stream: "state" events (bridge, show, assigned executors) when they change
+ *   GET  /api/events          text/event-stream: "state" events (bridge, show, assigned executors) when they change,
+ *                             and "changes" events (show-data changes pushed by bridge 0.46.0, see gma3_changes)
  *
  * Every request needs  Authorization: Bearer <GMA3_HTTP_TOKEN>  (or ?token= for EventSource clients that cannot set
  * headers). The API binds to 127.0.0.1 unless GMA3_HTTP_ALLOW_NETWORK=1: a token over plain HTTP on a network can be
@@ -140,6 +141,7 @@ export async function startHttpApi(o: HttpApiOptions): Promise<HttpApi> {
     polling = true;
     try {
       const bridge = await bridgeState(o.bridge);
+      if (bridge.connected) await ensureWatch(bridge.instance ?? null);
       let exec: unknown = null;
       if (bridge.connected && executors && served("gma3_executors", allow)) {
         const r = resultOf(await executors.handler({ only_assigned: true }));
@@ -157,6 +159,54 @@ export async function startHttpApi(o: HttpApiOptions): Promise<HttpApi> {
       polling = false;
     }
   };
+  // Show-data changes (bridge 0.46.0): while someone listens, this connection watches (changes.watch) and the bridge
+  // pushes {"event":"changes",...} lines, forwarded as "changes" events. The watch belongs to one connection and one
+  // bridge start: it is renewed after a reconnect or when ping names another instance. An older bridge (unknown op)
+  // is left alone until its instance changes.
+  let watchedConnection = 0;
+  let watchedInstance: unknown = undefined;
+  let unsupported: { instance: unknown } | null = null; // the bridge start that answered "unknown op"
+  let watching: Promise<void> | null = null;
+  /** `instance` is ping's (null when it names none); undefined when not known (right after a reconnect). */
+  const ensureWatch = (instance?: unknown): Promise<void> => {
+    if (streams.size === 0 || !o.bridge.connected) return Promise.resolve();
+    if (unsupported) {
+      if (instance === undefined) return Promise.resolve(); // the next ping tells whether it is another start
+      if (unsupported.instance === undefined) unsupported.instance = instance;
+      if (instance === unsupported.instance) return Promise.resolve();
+      unsupported = null;
+    }
+    const fresh = o.bridge.connectionCount !== watchedConnection || (instance !== undefined && instance !== watchedInstance);
+    if (!fresh || watching) return watching ?? Promise.resolve();
+    const connection = o.bridge.connectionCount;
+    watching = (async () => {
+      try {
+        const r = (await o.bridge.request("changes.watch", {}, 3000)) as { instance?: unknown } | null;
+        watchedConnection = connection;
+        watchedInstance = r?.instance ?? instance;
+      } catch (err) {
+        if (err instanceof Error && /unknown op/i.test(err.message)) unsupported = { instance };
+        // any other failure: tried again on the next poll
+      } finally {
+        watching = null;
+      }
+    })();
+    return watching;
+  };
+  const offEvent = o.bridge.onEvent((ev) => {
+    if (ev.event !== "changes" || streams.size === 0) return;
+    const data = JSON.stringify(ev);
+    for (const s of streams) s.write(`event: changes\ndata: ${data}\n\n`);
+  });
+  const offConnect = o.bridge.onConnect(() => {
+    if (streams.size) setImmediate(() => void ensureWatch());
+  });
+  const unwatch = () => {
+    if (watchedConnection && watchedConnection === o.bridge.connectionCount && o.bridge.connected) void o.bridge.request("changes.unwatch", {}, 3000).catch(() => {});
+    watchedConnection = 0;
+    watchedInstance = undefined;
+  };
+
   const startPolling = () => {
     if (!timer) timer = setInterval(() => void poll(), eventsMs);
   };
@@ -165,6 +215,7 @@ export async function startHttpApi(o: HttpApiOptions): Promise<HttpApi> {
       clearInterval(timer);
       timer = null;
       last = "";
+      unwatch();
     }
   };
 
@@ -230,6 +281,10 @@ export async function startHttpApi(o: HttpApiOptions): Promise<HttpApi> {
       for (const s of streams) s.end();
       streams.clear();
       if (timer) clearInterval(timer);
+      timer = null;
+      offEvent();
+      offConnect();
+      unwatch();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

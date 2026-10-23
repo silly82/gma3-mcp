@@ -4,6 +4,7 @@
  * Tests register per-op handlers. A handler returns a value (sent as {ok:true,result}), throws
  * (sent as {ok:false,error}), or returns the SILENT symbol to never answer (simulating a lost
  * reply so the client sees a dispatched timeout). Every request is recorded in `requests`.
+ * `push()` sends an id-less event line to every client, as the bridge does after changes.watch.
  */
 import net from "node:net";
 
@@ -96,6 +97,26 @@ export class FakeBridge {
     await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     this.port = (this.server.address() as net.AddressInfo).port;
     return this.port;
+  }
+
+  /** How many clients are connected now. */
+  get clientCount(): number {
+    return this.sockets.size;
+  }
+
+  /**
+   * Send an unsolicited line (no id) to every connected client, as bridge 0.46.0 pushes
+   * {"event":"changes",...} after changes.watch. Returns how many clients it was written to.
+   */
+  push(msg: Record<string, unknown>): number {
+    let n = 0;
+    for (const s of this.sockets) {
+      if (!s.destroyed) {
+        s.write(JSON.stringify(msg) + "\n");
+        n++;
+      }
+    }
+    return n;
   }
 
   /** Drop every client connection (simulates the console going away) but keep listening. */
