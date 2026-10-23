@@ -31,7 +31,7 @@ export const TASK_TOOLS: ReadonlyArray<{ task: string; tools: readonly string[] 
   { task: "OSC input and output", tools: ["gma3_osc", "gma3_configure_osc", "gma3_test_osc_input"] },
   { task: "save, load (bridge restarted) and list the show files", tools: ["gma3_save_show", "gma3_load_show", "gma3_show_files"] },
   { task: "tempo-sync plugin: status, configuration, ReSync of phasers", tools: ["gma3_tempo_sync_status", "gma3_configure_tempo_sync", "gma3_playback"] },
-  { task: "read show data and live state", tools: ["gma3_objects", "gma3_get_object", "gma3_list_children", "gma3_programmer", "gma3_fixture_attributes", "gma3_cues", "gma3_sequences"] },
+  { task: "read show data and live state", tools: ["gma3_objects", "gma3_get_object", "gma3_list_children", "gma3_programmer", "gma3_fixture_attributes", "gma3_cues", "gma3_sequences", "gma3_changes"] },
 ];
 
 /** Tools that watch the console over time on the server side: no Lua loop, no Lua time budget. */
@@ -61,7 +61,7 @@ export const BATCH_TOOLS: ReadonlyArray<{ tool: string; list: string }> = [
 
 const BATCH_NOTE = `Many objects at once: ${BATCH_TOOLS.map((b) => `${b.tool} (${b.list})`).join(", ")} take a list in one call, with per-item checks, read-back and one result line per item; never loop over them in Lua.`;
 
-const OBSERVE_NOTE = `Watching over time: ${OBSERVING_TOOLS.map((o) => `${o.tool} (${o.what})`).join(", ")}. They sample on the server side; never write a Lua waiting or polling loop (each gma3_lua request is limited to about 5 s).`;
+const OBSERVE_NOTE = `Watching over time: ${OBSERVING_TOOLS.map((o) => `${o.tool} (${o.what})`).join(", ")}. They sample on the server side; never write a Lua waiting or polling loop (gma3_lua stops after about 5 s).`;
 
 /** The server instructions: sent on every start; a stale build's warning comes first. */
 export function serverInstructions(staleWarning?: string): string {

@@ -40,6 +40,7 @@ import { registerNetOutputTools } from "./tools/netoutput.js";
 import { registerVariableTools } from "./tools/variables.js";
 import { registerOscTools } from "./tools/osc.js";
 import { registerShowTools } from "./tools/show.js";
+import { registerChangesTools } from "./tools/changes.js";
 import { registerTagTools, tagPlayback, tagTarget } from "./tools/tags.js";
 import { setPropertyChecked } from "./tools/setproperty.js";
 import { registerTempoSyncTools, resyncPlayback, RESYNC_NOTE } from "./tools/temposync.js";
@@ -713,6 +714,7 @@ registerOscTools(server, toolContext);
 registerShowTools(server, toolContext);
 registerTagTools(server, toolContext);
 registerTempoSyncTools(server, toolContext);
+registerChangesTools(server, toolContext);
 
 server.registerResource(
   "cheatsheet",
