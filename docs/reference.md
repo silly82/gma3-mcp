@@ -13,6 +13,8 @@
 | `GMA3_OSC_PREFIX` | *(none)* | OSC prefix configured in onPC, without slashes |
 | `GMA3_INSTALL_DIR` | `~/MALightingTechnology` | Base folder containing versioned `gma3_<version>` directories; set explicitly on Windows |
 | `GMA3_HELP_DIR` | *(auto-detected)* | Override with the exact manual HTML directory (`gma3_<version>/shared/language/HTML`) |
+| `GMA3_UNDO_GROUPS` | `1` | Set to `0` to stop wrapping each tool call's mutations in one console undo group ([below](#undo-groups)) |
+| `GMA3_UNDO_EXCLUDE` | *(none)* | Comma-separated tool names whose mutations get no undo group, in addition to `gma3_load_show` and `gma3_save_show` |
 
 ## Tools
 
@@ -137,6 +139,23 @@ When the build is stale at startup, the server's MCP instructions tell the agent
 instead of working around missing tools with `gma3_lua` or `gma3_command`. The startup log line on stderr
 says the same. Changes outside the hashed inputs (docs, the Lua plugin) do not make the build stale. A
 build made before this check existed has no stamp and no check, so it cannot report itself.
+
+### Undo groups
+
+With bridge 0.46.0 or later, every MCP tool call's mutation span is one undo group on the console, so a single Oops
+on the console reverts everything that call changed (all its commands, including a `gma3_batch` of many items). The
+server sends `undo.open {name: <tool name>}` when the call takes the mutation lock and `undo.close` when it releases
+it; the group is named `MCP <tool name>` on the console. The bridge joins every `Cmd`/`CmdIndirect` it runs for this
+server's connection to the open group, and commands from other connections or operators stay outside it.
+
+- Only commands that go through the bridge are grouped. OSC and keystroke input, and read-only tools, are not.
+- Edits that have no console undo (patch, 3D placement) are still not undoable; the group does not change that.
+- A call that changes nothing adds no Oops step (an empty group is dropped).
+- `gma3_load_show` and `gma3_save_show` are never grouped, since a group around a show switch would span two show
+  files. `GMA3_UNDO_EXCLUDE` adds tools to that list; `GMA3_UNDO_GROUPS=0` turns grouping off.
+- Grouping is best effort and never fails a tool call. A bridge older than 0.46.0 answers "unknown op"; the server
+  then stops trying until it restarts. Other errors (a lost reply, an unreachable bridge) are logged on stderr and
+  ignored. `gma3_status` shows the bridge's open group (if any) under `undo`, from `ping`.
 
 ## Workflow tools
 

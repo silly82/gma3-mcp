@@ -9,6 +9,7 @@ import { recordTools, startHttpApi } from "./http.js";
 import { helpDir, helpVersion, listHelpPages, lookupHelp } from "./help.js";
 import { CHEATSHEET } from "./cheatsheet.js";
 import { MutationLock } from "./mutations.js";
+import { UndoGroups } from "./undo.js";
 import { serverBuild } from "./buildinfo.js";
 import { operation, type ToolContext } from "./tools/context.js";
 import { dataPoolShape, scopedBridge } from "./tools/datapool.js";
@@ -87,7 +88,12 @@ const allowLuaTool = !/^(0|false|no|off)$/i.test((env.GMA3_ALLOW_LUA ?? "1").tri
 // existing single-command mutation tools and gma3_lua (arbitrary code cannot be classified as
 // read-only) take the same lock so a workflow is never split by them. This orders only this
 // process's own requests; it does not isolate anything from another console operator or client.
-const mutations = new MutationLock();
+// Each outermost mutation span is also one console undo group named after the tool (bridge 0.46.0): one Oops on the
+// console reverts the whole tool call. GMA3_UNDO_GROUPS=0 turns that off; show switches (and GMA3_UNDO_EXCLUDE) are never grouped.
+const bridgeTimeoutMs = Number(env.GMA3_BRIDGE_TIMEOUT_MS ?? 15000);
+const mutations = new MutationLock(
+  new UndoGroups(bridge, { env, openTimeoutMs: Math.min(3000, bridgeTimeoutMs), closeTimeoutMs: Math.min(5000, bridgeTimeoutMs) }),
+);
 const toolContext: ToolContext = {
   bridge,
   mutations,

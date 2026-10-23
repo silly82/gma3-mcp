@@ -17,6 +17,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Gma3Bridge } from "./bridge.js";
+import { inToolScope } from "./undo.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>;
 export interface RecordedTool {
@@ -27,14 +28,19 @@ export interface RecordedTool {
   handler: Handler;
 }
 
-/** Records every tool registered on `server` from now on (call before the registrations). */
+/**
+ * Records every tool registered on `server` from now on (call before the registrations). Every handler, over MCP and
+ * over HTTP, runs inside the tool scope (src/undo.ts) with its tool name, so its mutation span can be named after it.
+ */
 export function recordTools(server: McpServer): Map<string, RecordedTool> {
   const tools = new Map<string, RecordedTool>();
   const original = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
   (server as unknown as { registerTool: (...args: unknown[]) => unknown }).registerTool = (name: unknown, def: unknown, handler: unknown) => {
     const d = (def ?? {}) as { title?: string; description?: string; inputSchema?: Record<string, z.ZodTypeAny> };
-    tools.set(String(name), { name: String(name), title: d.title, description: d.description, inputSchema: d.inputSchema, handler: handler as Handler });
-    return original(name, def, handler);
+    const inner = handler as (...a: unknown[]) => unknown;
+    const scoped = typeof inner === "function" ? (...a: unknown[]) => inToolScope(String(name), () => inner(...a)) : inner;
+    tools.set(String(name), { name: String(name), title: d.title, description: d.description, inputSchema: d.inputSchema, handler: scoped as Handler });
+    return original(name, def, scoped);
   };
   return tools;
 }

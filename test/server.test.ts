@@ -109,11 +109,19 @@ after(async () => {
 
 test("gma3_command returns bridge feedback when the bridge replies", async () => {
   bridgeMode = "reply";
+  const from = bridgeRequests.length;
   const res = await client.callTool({ name: "gma3_command", arguments: { command: "Go+ Sequence 1" } });
   assert.equal(isError(res), false, textOf(res));
   assert.equal(textOf(res), "feedback for Go+ Sequence 1");
-  assert.deepEqual(bridgeRequests.at(-1)?.args, { command: "Go+ Sequence 1" });
-  assert.equal(bridgeRequests.at(-1)?.op, "cmd");
+  // The tool call's mutation span is one console undo group named after the tool (bridge 0.46.0).
+  assert.deepEqual(
+    bridgeRequests.slice(from).map((r) => [r.op, r.args]),
+    [
+      ["undo.open", { name: "gma3_command" }],
+      ["cmd", { command: "Go+ Sequence 1" }],
+      ["undo.close", {}],
+    ],
+  );
 });
 
 test("a command the bridge accepted but never answered is NOT resent over OSC", async () => {
