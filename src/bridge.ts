@@ -79,6 +79,11 @@ export class Gma3Bridge {
     return `${this.opts.host}:${this.opts.port}`;
   }
 
+  /** The bridge port this client connects to (GMA3_BRIDGE_PORT). */
+  get port(): number {
+    return this.opts.port;
+  }
+
   get lastErrorMessage(): string | null {
     return this.lastError;
   }
@@ -99,9 +104,12 @@ export class Gma3Bridge {
       };
       sock.setNoDelay(true);
       sock.setTimeout(timeout, () => fail(new BridgeUnreachableError(`connect timeout to ${this.description}`)));
+      // A socket that close() already replaced must not tear down its successor: destroy() emits "close" a tick
+      // later, when a new connection may be up (gma3_load_show reconnects right away).
+      const current = () => this.socket === sock || this.socket === null;
       sock.once("error", (err) => {
         if (!settled) fail(err);
-        else this.handleClose(err);
+        else if (current()) this.handleClose(err);
       });
       sock.connect(this.opts.port, this.opts.host, () => {
         settled = true;
@@ -112,7 +120,9 @@ export class Gma3Bridge {
         // setEncoding uses a streaming decoder so multi-byte UTF-8 sequences split across TCP packets are reassembled.
         sock.setEncoding("utf8");
         sock.on("data", (chunk: string) => this.onData(chunk));
-        sock.on("close", () => this.handleClose());
+        sock.on("close", () => {
+          if (current()) this.handleClose();
+        });
         resolve();
       });
     }).finally(() => {
@@ -122,8 +132,9 @@ export class Gma3Bridge {
   }
 
   close(): void {
-    this.socket?.destroy();
+    const sock = this.socket;
     this.socket = null;
+    sock?.destroy();
   }
 
   private handleClose(err?: Error): void {
