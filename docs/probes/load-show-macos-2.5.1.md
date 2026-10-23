@@ -29,7 +29,7 @@ needs a fresh connection.
 | Command | Dialog | Answer and result |
 | --- | --- | --- |
 | `NewShow "<name>"` | "Create New Show" / "Do you want to create a new show named '<name>'?", New Show / Cancel | New Show creates the show |
-| `LoadShow "<other>"`, current show has unsaved changes | "Warning" / "Show file '<current>' has changed.\nDo you want to save the old show file first?", Save / Do not save / Cancel | Save saved the old show, then loaded |
+| `LoadShow "<other>"`, current show has unsaved changes | "Warning" / "Show file '<current>' has changed!\nDo you want to save the old show file first?", Save / Do not save / Cancel | Save saved the old show, then loaded |
 | `LoadShow "<other>"`, no unsaved changes | none | loads at once |
 
 ## Restarting the bridge
@@ -39,14 +39,28 @@ needs a fresh connection.
 - A macro stored in the show works as a one-tap start: Macro 100 with the line `Plugin "gma3_mcp_bridge"`, run with
   `Go+ Macro 100`.
 
+## gma3_load_show live (bridge 0.45.0)
+
+Same day, the plugin replaced by 0.45.0 in a disposable show (`mcp_test_load_start`), `test/live/load-show.live.ts`
+run with `GMA3_LIVE=1 GMA3_LIVE_EXCLUSIVE=1 GMA3_LIVE_LOAD=1`, restart `auto` (keystrokes; OSC input stayed off).
+Final run 3/3.
+
+| Case | Result |
+| --- | --- |
+| Load a scratch copy, no unsaved changes | no dialog; two silent probes, then the keystroke restart (`Plugin "gma3_mcp_bridge"`, one send); a new instance named the scratch show after about 6 s: matched |
+| Unsaved changes (a stored macro), `unsaved: refuse` | the question came; Cancel was pressed; read back: the question closed, the same show and the same bridge instance answered: nothing loaded |
+| Back to the start show, `unsaved: discard` | Do not save was pressed; **its reply was lost**: the press starts the load at once and the load unloads the bridge first. The new instance naming the start show proves the press acted (the tool marks the step so) |
+
+Corrections from the live run:
+- The question's text is "Show file '<current>' has **changed!**" (exclamation mark). The first build expected a
+  full stop, did not recognise the question, reported it as an unexpected dialog and answered nothing (the safe
+  path); it was cancelled through `dialog.press` and the text fixed.
+- Typed keys go to onPC's keyboard focus. Typing while the Add Window pop-up was open put the text into its filter
+  field and ran nothing; the restart after a load found the command line focused every time.
+
 ## Open items
 
-Not live-tested yet:
-- the bridge op `show.load` (LoadShow queued with `CmdIndirect`) and `gma3_load_show` itself, including its
-  unsaved-changes answers through `dialog.press`;
-- the keystroke restart (`src/keystroke.ts`: System Events types `Plugin "gma3_mcp_bridge"` into `app_gma3`) through
-  the tool; typing that line by hand after a load was used throughout this session;
-- the OSC restart path (the mechanism of `gma3_start_bridge`, `Plugin "gma3_mcp_bridge"` over `/cmd`) right after a
-  load. It depends on the loaded show's OSC input settings (Enable Input, Receive Command).
-
-The tool's behaviour is covered by `test/load-show.test.ts` against the fake bridge only.
+- The OSC restart path (`restart: osc`) right after a load is not live-tested: OSC input stayed off. It depends on
+  the loaded show's OSC input settings (Enable Input, Receive Command), and the console then accepts commands on
+  every interface.
+- Windows (no keystroke restart there: `auto` uses OSC).

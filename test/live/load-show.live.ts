@@ -82,7 +82,9 @@ liveTest("gma3_load_show: load a scratch copy (bridge restarted), refuse over un
       const step = r.result.steps.find((s: { name: string }) => s.name === "unsaved_changes");
       assert.ok(step, r.text);
       assert.equal(step.detail.clicked, "Cancel");
-      assert.equal(r.result.verification.status, "unavailable");
+      // Refused (an error), with the read-back that nothing was loaded: the same show and bridge instance answer.
+      assert.equal(r.result.verification.status, "matched", r.text);
+      assert.equal(r.result.steps.find((s: { name: string }) => s.name === "read_back")?.status, "failed", r.text);
       assert.equal(r.result.current, A);
       assert.equal(await current(), A);
       assert.ok((await total(MACRO)) > 0, `${MACRO} is still there`);

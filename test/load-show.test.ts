@@ -2,7 +2,7 @@
  * gma3_load_show against an in-process FakeBridge.
  *
  * `LoadConsole` models LoadShow as seen live on onPC 2.5.1 (docs/probes/load-show-macos-2.5.1.md): the command is queued
- * (CmdIndirect); with unsaved changes the console first asks "Warning" / "Show file '<current>' has changed. Do you
+ * (CmdIndirect); with unsaved changes the console first asks "Warning" / "Show file '<current>' has changed! Do you
  * want to save the old show file first?" (Save / Do not save / Cancel); the load unloads the bridge, whose socket then
  * stays open without answers; the loaded show's bridge runs only once `Plugin "gma3_mcp_bridge"` arrives, over OSC
  * only when that show has the plugin and OSC input.
@@ -39,6 +39,8 @@ class LoadConsole {
   stallReads = 0;
   /** The answered question stays visible for this many more reads. */
   lingerReads = 0;
+  /** dialog.press answers Save / Do not save before the load (the live console does not). */
+  pressReplies = false;
   /** ping answers without showfile. */
   noShowfile = false;
   unsavedChanges = false;
@@ -116,7 +118,7 @@ class LoadConsole {
       const name = String(args.name);
       if (!this.shows.has(name)) throw new Error(`[no-file] ${name}.show is not in the shows folder; LoadShow was not sent`);
       this.pendingLoad = name;
-      if (this.unsavedChanges) this.modal = { title: "Warning", text: `Show file '${this.current}' has changed.\nDo you want to save the old show file first?`, buttons: ["Save", "Do not save", "Cancel"] };
+      if (this.unsavedChanges) this.modal = { title: "Warning", text: `Show file '${this.current}' has changed!\nDo you want to save the old show file first?`, buttons: ["Save", "Do not save", "Cancel"] };
       return { queued: true, command: `LoadShow "${name}"`, from: this.current };
     });
     h.fake.on("dialog.press", (args) => {
@@ -127,8 +129,16 @@ class LoadConsole {
       this.presses.push(button);
       this.answered = this.modal;
       this.modal = null;
-      if (button === "Cancel") this.pendingLoad = null;
+      if (button === "Cancel") {
+        this.pendingLoad = null;
+        return { clicked: button, title: "Warning" };
+      }
       if (button === "Save") this.saves++;
+      // Live: Save / Do not save starts the load at once; the bridge is unloaded before it replies.
+      if (!this.pressReplies) {
+        this.load(this.pendingLoad!);
+        return SILENT;
+      }
       return { clicked: button, title: "Warning" };
     });
   }
@@ -195,6 +205,11 @@ test("load_show: unsaved save presses Save, then the load and the restart go on"
   assert.equal(r.isError, false, r.text);
   assert.deepEqual(con.presses, ["Save"]);
   assert.equal(con.saves, 1);
+  // The press got no reply (the load unloaded the bridge); the confirmed load proves it acted.
+  const press = r.result.steps.find((s: { name: string }) => s.name === "unsaved_changes");
+  assert.equal(press.status, "succeeded");
+  assert.match(press.detail.note, /proves the press acted/);
+  assert.equal(r.result.outcome, "succeeded");
   assert.equal(r.result.unsavedAnswer, "Save");
   assert.equal(r.result.verification.status, "matched");
 });
@@ -234,7 +249,7 @@ test("load_show: a loaded show with an older bridge is confirmed and warned abou
 test("load_show: a dialog that is not the unsaved-changes question is not answered", async () => {
   con.unsavedChanges = true;
   // The question names another show: not ours.
-  h.fake.on("show.files", () => ({ current: "Show A", path: "/shows", listed: true, files: [{ name: "Show A" }, { name: "Other" }], modal: con.pendingLoad ? { class: "MessageBox", title: UNSAVED_TITLE, text: "Show file 'Elsewhere' has changed.\nDo you want to save the old show file first?" } : false, modalKnown: true }));
+  h.fake.on("show.files", () => ({ current: "Show A", path: "/shows", listed: true, files: [{ name: "Show A" }, { name: "Other" }], modal: con.pendingLoad ? { class: "MessageBox", title: UNSAVED_TITLE, text: "Show file 'Elsewhere' has changed!\nDo you want to save the old show file first?" } : false, modalKnown: true }));
   const r = await h.callJson("gma3_load_show", { name: "Other", unsaved: "discard", exclusive: true });
   assert.equal(r.isError, true);
   assert.deepEqual(con.presses, []);
@@ -305,6 +320,7 @@ test("review: one silent read while the old bridge lives is not a load; reloadin
 
 test("review: the answered question still visible for a moment is not a foreign dialog", async () => {
   con.unsavedChanges = true;
+  con.pressReplies = true;
   con.lingerReads = 2;
   const r = await h.callJson("gma3_load_show", { name: "Other", unsaved: "discard", exclusive: true });
   assert.equal(r.isError, false, r.text);

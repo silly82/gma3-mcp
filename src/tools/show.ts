@@ -277,11 +277,11 @@ export async function saveShow(ctx: ToolContext, raw: Record<string, unknown>): 
 }
 
 /**
- * LoadShow with unsaved changes asks this first (live, onPC 2.5.1): "Warning" / "Show file '<current>' has changed.
+ * LoadShow with unsaved changes asks this first (live, onPC 2.5.1): "Warning" / "Show file '<current>' has changed!
  * Do you want to save the old show file first?" with Save / Do not save / Cancel.
  */
 export const UNSAVED_TITLE = "Warning";
-export const unsavedText = (current: string) => `Show file '${current}' has changed. Do you want to save the old show file first?`;
+export const unsavedText = (current: string) => `Show file '${current}' has changed! Do you want to save the old show file first?`;
 const UNSAVED_BUTTON = { refuse: "Cancel", save: "Save", discard: "Do not save" } as const;
 type Unsaved = keyof typeof UNSAVED_BUTTON;
 const BRIDGE_COMMAND = 'Plugin "gma3_mcp_bridge"';
@@ -452,7 +452,9 @@ export async function loadShow(ctx: ToolContext, raw: Record<string, unknown>): 
       steps.push(unchanged
         ? asRead({ name: "read_back", status: "failed", error: `${current} has unsaved changes: Cancel was pressed and nothing was loaded (the same show and bridge answer); pass unsaved: save or discard` })
         : asRead({ name: "read_back", status: "unknown", error: `Cancel was pressed, but ${after ? (after.modal ? `a dialog is still open (${after.modal.title})` : `the console's show is ${after.current} and the bridge ${still === instance ? "is the same" : "is another"}`) : "the bridge does not answer"}: check the console` }));
-      return done(unchanged ? { status: "matched", checked: "nothing was loaded: the question closed, the same show and bridge answer", expected: { current }, actual: { current: after!.current } } : unavailable("whether the load was cancelled could not be confirmed"), { unsavedAnswer: answered });
+      const result = done(unchanged ? { status: "matched", checked: "nothing was loaded: the question closed, the same show and bridge answer", expected: { current }, actual: { current: after!.current } } : unavailable("whether the load was cancelled could not be confirmed"), { unsavedAnswer: answered });
+      if (unchanged) result.summary = `Not loaded: ${current} has unsaved changes, so Cancel was pressed; read back: ${current} and the same bridge still answer. Pass unsaved: save or discard to load ${to}.`;
+      return result;
     }
     if (foreign) {
       steps.push({ name: "wait", status: "unknown", error: `an unexpected dialog (${foreign.title ?? foreign.name ?? foreign.class}) is open; it was not answered: answer it at the console`, detail: { modal: foreign } });
@@ -517,6 +519,14 @@ export async function loadShow(ctx: ToolContext, raw: Record<string, unknown>): 
       if (v && older(v, [0, 45, 0]) < 0) warnings.push(`the loaded show carries bridge ${ping.bridgeVersion}: gma3_load_show and the newest tools need 0.45.0; re-import the plugin into this show and save it`);
       if (sends > 0) warnings.push(`the bridge was started with default policies (${startCommand}): Lua, input and control are off; start it with arguments at the console if you need them`);
       const loaded = ping.showfile;
+      // Live: Save / Do not save starts the load at once, which unloads the bridge before it replies to dialog.press.
+      // A new bridge naming the requested show proves that the press acted.
+      const press = steps.find((s) => s.name === "unsaved_changes");
+      if (press?.status === "unknown" && same(loaded as string | undefined, to)) {
+        press.status = "succeeded";
+        press.error = undefined;
+        press.detail = { ...(press.detail as object), note: "the reply was lost because the press started the load (it unloaded the bridge); the load that followed proves the press acted" };
+      }
       if (typeof loaded !== "string") steps.push({ name: "confirm_show", status: "unknown", error: "the new bridge does not name the console's show: check it with gma3_show_files" });
       verification =
         typeof loaded !== "string"

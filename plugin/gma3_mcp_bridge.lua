@@ -6100,7 +6100,7 @@ GUARDED_OPS["tags.protect"] = "a tag protection change"
 
   -- 0.45.0: args: { name, exclusive }. Queues LoadShow "name" with CmdIndirect, only for a .show file that is in the
   -- shows folder. Loading unloads the show's plugins, this bridge included (live, onPC 2.5.1): the answer to this
-  -- request is the last one. A show with unsaved changes first asks "Warning" / "Show file '<current>' has changed.
+  -- request is the last one. A show with unsaved changes first asks "Warning" / "Show file '<current>' has changed!
   -- Do you want to save the old show file first?" (Save / Do not save / Cancel); the server answers it with
   -- dialog.press before the load goes on.
   ops["show.load"] = function(args)

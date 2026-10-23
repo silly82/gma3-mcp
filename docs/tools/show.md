@@ -85,7 +85,7 @@ From the probe ([load-show-macos-2.5.1.md](../probes/load-show-macos-2.5.1.md)):
 
 - **A raw `LoadShow` through `gma3_command`** times out, and the bridge never answers again. The old socket stays
   open without answers; later connects are refused until the plugin is started.
-- **With unsaved changes**, LoadShow first asks "Warning" / "Show file '<current>' has changed. Do you want to save
+- **With unsaved changes**, LoadShow first asks "Warning" / "Show file '<current>' has changed! Do you want to save
   the old show file first?" (Save / Do not save / Cancel). Without unsaved changes it loads with no dialog.
 - **No plugin starts on show load** in onPC 2.5.1. `Plugin "gma3_mcp_bridge"` starts the bridge in about 1 s in a
   show that contains it; a macro with that line stored in the show is a one-tap start.
@@ -134,5 +134,5 @@ Mac. Otherwise the show is loaded but not confirmed. The restarted bridge runs w
 control off; the result warns). A loaded show that carries a bridge older than 0.45.0 is confirmed with a warning:
 re-import the plugin into that show and save it. There is no undo.
 
-Not live-tested yet: `show.load`, this tool, and the keystroke and OSC restarts right after a load (see the probe's
-open items).
+Live-tested on macOS with the keystroke restart (`test/live/load-show.live.ts`, 3/3); the OSC restart is not
+live-tested yet (see the probe's open items).
