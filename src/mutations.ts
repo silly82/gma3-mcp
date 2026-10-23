@@ -8,9 +8,32 @@
  * It only orders this process's own requests. It does not isolate a workflow from another console
  * operator, another MCP server, or anything else talking to the console at the same time.
  */
+export interface MutationHooks {
+  /** Called when a span starts (depth 0 -> 1), after the previous holder released the lock. */
+  enter?(): Promise<void>;
+  /** Called when the span ends (depth 1 -> 0), before the lock is released; also after a failed mutation. */
+  exit?(): Promise<void>;
+}
+
 export class MutationLock {
   private tail: Promise<void> = Promise.resolve();
   private depth = 0;
+
+  /**
+   * `hooks` wrap every outermost span, e.g. one console undo group per span (src/undo.ts). A hook error never fails
+   * the mutation: it is swallowed here.
+   */
+  constructor(private readonly hooks: MutationHooks = {}) {}
+
+  private async hook(which: "enter" | "exit"): Promise<void> {
+    const fn = this.hooks[which];
+    if (!fn) return;
+    try {
+      await fn.call(this.hooks);
+    } catch {
+      // A hook is best effort by contract.
+    }
+  }
 
   /** Run `fn` after every previously queued mutation has finished. */
   async run<T>(fn: () => Promise<T>): Promise<T> {
@@ -22,7 +45,12 @@ export class MutationLock {
     await previous;
     this.depth++;
     try {
-      return await fn();
+      if (this.depth === 1) await this.hook("enter");
+      try {
+        return await fn();
+      } finally {
+        if (this.depth === 1) await this.hook("exit");
+      }
     } finally {
       this.depth--;
       release();
@@ -42,6 +70,10 @@ export class MutationLock {
  * mutation from this server can run between two items.
  */
 export class HeldLock extends MutationLock {
+  constructor() {
+    super();
+  }
+
   override async run<T>(fn: () => Promise<T>): Promise<T> {
     return fn();
   }
