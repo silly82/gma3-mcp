@@ -15,6 +15,7 @@ bridge 0.45.0 started with `lua=on` for the probes, then 0.46.0 for the live che
 | One `Oops` after a group | reverts every command of the group (two `Store Macro` + a `Label`: all gone) |
 | Without a group | one `Oops` per command |
 | Group closed before its `CmdIndirect` commands ran | the group does not hold them: one `Oops` reverted only the last one |
+| `Oops` while a group is open | "Not possible at the moment", with or without the handle; after `CloseUndo` it works |
 | Empty group | adds no Oops step (the next `Oops` reverted the store before it) |
 | `HookObjectChange(fn, obj, plugin)` | needs the **Plugin object** (`DataPool().Plugins[...]`, i.e. the component's `Parent()`); the component answers `nil` |
 | A second hook with the same function | answers `-1`: one hook per callback function, so every hook needs its own closure |
@@ -38,3 +39,14 @@ Live check with 0.46.0: a group "live test" with `Store Macro 960`, `Store Macro
 `commands: 3`; one `Oops` removed both macros. `changes.watch` pushed `pool:Macros children`; `Store Sequence 99`,
 `Store Sequence 99 Cue 2` and `Delete Sequence 99` gave `pool:Sequences children`, `sequence:99 children`,
 `sequence:99 6`, `pool:Sequences children`, and the hook count was back at 65.
+
+Merged server (undo groups per tool call, `gma3_changes`, SSE `changes`) over the HTTP API against 0.46.0:
+`gma3_store_macro` (create, 3 lines, 23 steps) was removed completely by one `Oops`; `gma3_command "Oops"` first
+answered "Not possible at the moment" (its own group was open), so the bridge now closes the connection's group
+before a command that runs Oops. `gma3_changes` with `wait_ms` returned `pool:Macros children`, and `/api/events`
+sent `event: changes`. Note: an `Oops` with nothing of the MCP's left to undo reverts the operator's last step
+(here: the plugin import).
+
+`gma3_network_output` received nothing on this Mac: onPC's sACN and Art-Net have no interface selected
+(`interface 0.0`) and only universe 2 is granted, so the console opens no output socket. Not changed here (station
+network setting); to be checked in the venue with the wing.

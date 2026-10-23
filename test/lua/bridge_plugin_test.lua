@@ -2687,12 +2687,22 @@ do
   r, frames = request("undo.close", {}, nil, a)
   check("undo.close: waits frames for queued CmdIndirect commands before closing", r.ok and r.result.closed and frames >= 3 and closed[2] == undos[2], J({ r, frames }))
 
+  request("undo.open", { name = "gma3_command" }, nil, a)
+  r = request("cmd", { command = "Oops /NoConfirmation" }, nil, a)
+  check("undo: Oops closes the connection's open group first and runs outside it", r.ok and state.undo == nil and closed[3] == undos[3] and ran[#ran].u == nil, J({ r, ran[#ran] }))
+  r = request("undo.close", {}, nil, a)
+  check("undo: the close after an Oops finds nothing open", r.ok and r.result.closed == false, J(r))
+  request("undo.open", { name = "goops" }, nil, a)
+  request("cmd", { command = "Label Macro 1 \"Hoopsala\"" }, nil, a)
+  check("undo: a word that only contains oops keeps the group", state.undo ~= nil and ran[#ran].u == undos[4], J(ran[#ran]))
+  request("undo.close", {}, nil, a)
+
   request("undo.open", { name = "first" }, nil, a)
   r = request("undo.open", { name = "second" }, nil, a)
-  check("undo.open: a group still open is closed first", r.ok and r.result.replaced and r.result.replaced.name == "first" and closed[3] == undos[3], J(r))
+  check("undo.open: a group still open is closed first", r.ok and r.result.replaced and r.result.replaced.name == "first" and closed[5] == undos[5], J(r))
   state.clients = { a }
   state._closeClient(1, "disconnect")
-  check("undo: closing the owning connection closes its group", state.undo == nil and closed[4] == undos[4], J(closed))
+  check("undo: closing the owning connection closes its group", state.undo == nil and closed[6] == undos[6], J(closed))
   state.clients = saved.clients
 
   NeedShowSave = function() return true end

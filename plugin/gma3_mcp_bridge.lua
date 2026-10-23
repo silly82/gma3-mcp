@@ -2795,13 +2795,23 @@ function MCPX.undoHandle()
   return nil
 end
 
+-- An open group makes Oops answer "Not possible at the moment" (live probe), with or without the handle: a command
+-- that runs Oops closes the connection's group first, so Oops acts on the steps before it as typed.
+local function closeBeforeOops(command)
+  if state.undo and MCPX.undoHandle() and type(command) == "string" and command:lower():find("%f[%a]oops%f[%A]") then
+    MCPX.closeUndo("before Oops", true)
+  end
+end
+
 function MCPX.cmd(command)
+  closeBeforeOops(command)
   local g = MCPX.undoHandle()
   if g then g.commands = g.commands + 1; return Cmd(command, g.handle) end
   return Cmd(command)
 end
 
 function MCPX.indirect(command)
+  closeBeforeOops(command)
   local g = MCPX.undoHandle()
   if g then g.commands = g.commands + 1; g.indirect = true; return CmdIndirect(command, g.handle) end
   return CmdIndirect(command)
