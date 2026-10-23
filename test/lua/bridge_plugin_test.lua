@@ -1560,7 +1560,7 @@ do
   r = request("feedback.read", {}, nil, C)
   check("feedback.read without items is refused with a code", r.ok == false and r.code == "no-items", r.error)
   r = request("feedback.read", { readers = { "commandText", "lastCommand", "blind", "solo", "page", "freeze", "selectedSequence", "previewBar", "sequenceActive" }, displays = { 1, 2, 9 }, executors = { 201, 202 }, sequences = { 5, 6 } }, nil, C)
-  check("feedback.read answers with Lua disabled", r.ok and r.result.atomic == false and r.result.epoch == 1 and r.result.bridgeVersion == "0.45.0" and r.result.module.version == feedbackModule.VERSION and r.result.identity.showFile == "mcp-test-disposable", J(r))
+  check("feedback.read answers with Lua disabled", r.ok and r.result.atomic == false and r.result.epoch == 1 and r.result.bridgeVersion == "0.46.0" and r.result.module.version == feedbackModule.VERSION and r.result.identity.showFile == "mcp-test-disposable", J(r))
   local by = {}
   if r.ok then for _, it in ipairs(r.result.items) do by[it.key] = it end end
   check("feedback.read: command text and last command are raw observations", by.commandText and by.commandText.value == "Store " and by.lastCommand.value == "Go+ Sequence 5 : OK" and by.lastCommand.note:find("not confirmation"), J(by.lastCommand))
@@ -1673,7 +1673,7 @@ do
   end
   local C = { id = 71 }
   r = request("feedback.context", { executors = { 201, 202 } }, nil, C)
-  check("feedback.context answers with Lua and input disabled", r.ok and r.result.bridgeVersion == "0.45.0" and r.result.module.version == feedbackModule.VERSION and r.result.atomic == false and r.result.generation == 1 and r.result.generationChanged == false and r.result.identity.showFile == "mcp-test-disposable" and r.result.identity.dataPool.name == "Default", J(r))
+  check("feedback.context answers with Lua and input disabled", r.ok and r.result.bridgeVersion == "0.46.0" and r.result.module.version == feedbackModule.VERSION and r.result.atomic == false and r.result.generation == 1 and r.result.generationChanged == false and r.result.identity.showFile == "mcp-test-disposable" and r.result.identity.dataPool.name == "Default", J(r))
   check("feedback.context: authoritative display, bank/page, slots with availability and value", r.ok and r.result.authoritativeDisplay.rule == "configured" and r.result.encoder.value.bank.name == "Color" and r.result.encoder.value.page.name == "RGB" and r.result.slots.value.slots[1].name == "ColorRGB_R" and r.result.slots.value.slots[1].availability == "available" and r.result.slots.value.slots[1].absolute == 50 and r.result.slots.value.slots[1].unit == "None" and r.result.slots.value.slots[2].valueState == "empty" and r.result.executorPage.no == 1, J(r.result.slots))
   check("feedback.context: executor targets with functions, level and playback-target status", r.ok and #r.result.executors == 2 and r.result.executors[1].value.functions.keyPress == "Temp" and r.result.executors[1].value.level.value == 100 and r.result.executors[1].value.playbackTarget == true and r.result.executors[2].value.empty == true and r.result.executors[2].value.reserved == nil, J(r.result.executors))
   check("feedback.context: nested fields survive the serialiser depth bound", r.ok and type(r.result.slots.value.slots[1].feature) == "string" and type(r.result.executors[1].value.assigned.name) == "string")
@@ -2649,6 +2649,121 @@ do
 
   Root, GetPath, DirList, CmdIndirect, GetTopModal, Mouse = saved.Root, saved.GetPath, saved.DirList, saved.CmdIndirect, saved.GetTopModal, saved.Mouse
   Enums.PathType.Showfiles = saved.Showfiles
+end
+
+-------------------------------------------------------------------------------
+-- 0.46.0: undo groups, show state in ping, show-data change tracking
+-------------------------------------------------------------------------------
+do
+  local saved = { Cmd = Cmd, CmdIndirect = CmdIndirect, DataPool = DataPool, clients = state.clients }
+  local undos, closed, ran = {}, {}, {}
+  CreateUndo = function(name) local u = { name = name }; undos[#undos + 1] = u; return u end
+  CloseUndo = function(u) closed[#closed + 1] = u; return true end
+  Cmd = function(c, u) ran[#ran + 1] = { c = c, u = u, how = "cmd" }; return "OK" end
+  CmdIndirect = function(c, u) ran[#ran + 1] = { c = c, u = u, how = "indirect" } end
+  local a, b = { id = 1 }, { id = 2 }
+
+  local r = request("undo.open", {}, nil, a)
+  check("undo.open: a name is required", r.ok == false and r.error:find("args.name"), J(r))
+  r = request("undo.open", { name = "gma3_build_phaser" }, nil, a)
+  check("undo.open: opens a console undo group named after the tool", r.ok and r.result.open and undos[1].name == "MCP gma3_build_phaser", J(r))
+  r = request("cmd", { command = "Store Macro 950" }, nil, a)
+  check("undo: a command of the owning connection joins the group", r.ok and ran[#ran].u == undos[1], J(ran))
+  r = request("cmd", { command = "Go+ Sequence 1" }, nil, b)
+  check("undo: a command of another connection stays outside it", r.ok and ran[#ran].u == nil, J(ran))
+  r = request("ping", {}, nil, b)
+  check("undo: ping reports the open group", r.ok and r.result.undo.open == true and r.result.undo.name == "gma3_build_phaser" and r.result.undo.commands == 1, J(r))
+  r = request("undo.close", {}, nil, b)
+  check("undo.close: another connection cannot close the group", r.ok and r.result.closed == false and #closed == 0, J(r))
+  local frames
+  r, frames = request("undo.close", {}, nil, a)
+  check("undo.close: closes it without waiting when only Cmd() joined", r.ok and r.result.closed and r.result.commands == 1 and closed[1] == undos[1] and frames == 0, J({ r, frames }))
+  r = request("undo.close", {}, nil, a)
+  check("undo.close: nothing open is not an error", r.ok and r.result.closed == false, J(r))
+
+  request("undo.open", { name = "patch" }, nil, a)
+  state.reqClient = a; state._mcpx.indirect("ChangeDestination Root"); state.reqClient = nil
+  check("undo: CmdIndirect joins the group too", ran[#ran].how == "indirect" and ran[#ran].u == undos[2], J(ran))
+  r, frames = request("undo.close", {}, nil, a)
+  check("undo.close: waits frames for queued CmdIndirect commands before closing", r.ok and r.result.closed and frames >= 3 and closed[2] == undos[2], J({ r, frames }))
+
+  request("undo.open", { name = "first" }, nil, a)
+  r = request("undo.open", { name = "second" }, nil, a)
+  check("undo.open: a group still open is closed first", r.ok and r.result.replaced and r.result.replaced.name == "first" and closed[3] == undos[3], J(r))
+  state.clients = { a }
+  state._closeClient(1, "disconnect")
+  check("undo: closing the owning connection closes its group", state.undo == nil and closed[4] == undos[4], J(closed))
+  state.clients = saved.clients
+
+  NeedShowSave = function() return true end
+  GetShowFileStatus = function() return "ShowLoaded" end
+  GetSample = function(k) if k == "CPU" then return 7.5 end return 0 end
+  r = request("ping", {})
+  check("ping: show state (unsaved, file status, CPU; zero temperatures left out)", r.ok and r.result.show.saveNeeded == true and r.result.show.fileStatus == "ShowLoaded" and r.result.show.cpu == 7.5 and r.result.show.cpuTemp == nil, J(r))
+  NeedShowSave = function() error("not here") end
+  r = request("ping", {})
+  check("ping: a failing NeedShowSave leaves the field out", r.ok and r.result.show.saveNeeded == nil and r.result.show.fileStatus == "ShowLoaded", J(r))
+
+  -- Change hooks: one hook per callback function, as on the console (a second one answers -1).
+  local hooks, nextHook, unhooked = {}, 100, {}
+  local seenFn = {}
+  HookObjectChange = function(fn, obj, plugin)
+    if seenFn[fn] or plugin ~= pluginHandle then return -1 end
+    seenFn[fn] = true; nextHook = nextHook + 1; hooks[nextHook] = { fn = fn, obj = obj }; return nextHook
+  end
+  Unhook = function(id) unhooked[#unhooked + 1] = id; hooks[id] = nil end
+  local function obj(name, no, children) return { name = name, no = no, Children = function() return children or {} end } end
+  local seq1, seq2 = obj("Sequence 1", 1), obj("Hazer", 2)
+  local seqs = obj("Sequences", nil, { seq1, seq2 })
+  local pp1 = obj("Dimmer", 1)
+  local pps = obj("PresetPools", nil, { pp1 })
+  local macros = obj("Macros", nil, {})
+  local dp = obj("Default", 1, { seqs, pps, macros })
+  dp.Sequences = seqs; dp.PresetPools = pps
+  DataPool = function() return dp end
+  local function fire(o, change) for _, h in pairs(hooks) do if h.obj == o then h.fn(o, change) end end end
+
+  r = request("changes.since", { cursor = 0 })
+  check("changes.since: hooks every pool, preset pool and sequence on first use", r.ok and r.result.hooks == 6 and #r.result.changes == 0 and r.result.latest == 0, J(r))
+  fire(seq1, 10)
+  _G.FAKE_CLOCK_OFFSET = (_G.FAKE_CLOCK_OFFSET or 0) + 1
+  fire(macros, 10)
+  r = request("changes.since", { cursor = 0 })
+  check("changes.since: lists the changes in order", r.ok and #r.result.changes == 2 and r.result.changes[1].kind == "sequence" and r.result.changes[1].no == 1 and r.result.changes[1].what == "children" and r.result.changes[2].key == "pool:Macros" and r.result.cursor == 2, J(r))
+  r = request("changes.since", { cursor = 2 })
+  check("changes.since: nothing after the cursor", r.ok and #r.result.changes == 0 and r.result.cursor == 2, J(r))
+  fire(pp1, 10); fire(pp1, 10); fire(pp1, 10)
+  r = request("changes.since", { cursor = 2 })
+  check("changes.since: a burst on one object is one entry with a count", r.ok and #r.result.changes == 1 and r.result.changes[1].count == 3 and r.result.changes[1].kind == "presetPool", J(r))
+
+  -- A new sequence: the pool hook fires, the next service frame hooks it.
+  local seq3 = obj("New", 3)
+  seqs.Children = function() return { seq1, seq3 } end
+  fire(seqs, 10)
+  local pushed = {}
+  local watcher = { id = 9 }
+  state.clients = { watcher }
+  r = request("changes.watch", {}, nil, watcher)
+  check("changes.watch: marks the connection with the current cursor", r.ok and r.result.watching and watcher.watchCursor == r.result.cursor, J(r))
+  local cur = watcher.watchCursor
+  state._mcpx.serviceChanges(function(cl, line) pushed[#pushed + 1] = json.decode(line) end)
+  check("changes: the service frame hooks the new sequence and drops the deleted one", hooks[nextHook] and hooks[nextHook].obj == seq3 and #unhooked == 1, J(unhooked))
+  fire(seq3, 11)
+  _G.FAKE_CLOCK_OFFSET = (_G.FAKE_CLOCK_OFFSET or 0) + 1
+  state._mcpx.serviceChanges(function(cl, line) pushed[#pushed + 1] = json.decode(line) end)
+  check("changes: a watching connection gets the new entries pushed as an id-less event line", #pushed == 1 and pushed[1].event == "changes" and pushed[1].id == nil and #pushed[1].changes == 1 and pushed[1].changes[1].what == "object" and pushed[1].changes[1].name == "New" and watcher.watchCursor > cur, J(pushed))
+  state._mcpx.serviceChanges(function(cl, line) pushed[#pushed + 1] = json.decode(line) end)
+  check("changes: nothing new, nothing pushed", #pushed == 1, J(pushed))
+  r = request("changes.unwatch", {}, nil, watcher)
+  check("changes.unwatch: the connection stops watching", r.ok and watcher.watchCursor == nil, J(r))
+  r = request("ping", {})
+  check("ping: reports the change log once hooks are installed", r.ok and r.result.changes.hooks == 6 and r.result.changes.latest >= 6, J(r))
+  local n = state._mcpx.unhookAll()
+  check("changes: unhookAll removes every hook", n == 6 and state.changes == nil, J(unhooked))
+
+  state.clients = saved.clients
+  Cmd, CmdIndirect, DataPool = saved.Cmd, saved.CmdIndirect, saved.DataPool
+  CreateUndo, CloseUndo, NeedShowSave, GetShowFileStatus, GetSample, HookObjectChange, Unhook = nil, nil, nil, nil, nil, nil, nil
 end
 
 print(string.format("%d passed, %d failed", passes, failures))

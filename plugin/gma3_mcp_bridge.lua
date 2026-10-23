@@ -150,14 +150,14 @@
 --            {"id": "<any>", "ok": false, "error": "..."}
 
 local pluginName    = select(1, ...)
-local componentName = select(2, ...)
+-- select(2, ...) is the component name; unused (0.46.0 freed its local slot: the main chunk is at Lua's limit of 200)
 local signalTable   = select(3, ...)
 local my_handle     = select(4, ...)
 
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION      = "0.45.0"
+local VERSION      = "0.46.0"
 local DEFAULT_PORT = 9800
 -- Execution policy defaults for the "lua" op (see header). Changed per start with the
 -- "luatime=<ms>" / "luasteps=<n>" tokens, or at runtime with "lua on|off".
@@ -176,6 +176,7 @@ local MAX_DEPTH    = 6
 
 -- State survives repeated Plugin calls (file-level locals are re-created on ReloadAllPlugins only).
 _G.__gma3_mcp_bridge = _G.__gma3_mcp_bridge or { running = false, host = BIND_HOST, port = DEFAULT_PORT, server = nil, clients = {}, requests = 0 }
+local MCPX = {}  -- undo groups and change tracking (0.46.0); filled in further down
 local state = _G.__gma3_mcp_bridge
 -- Lua execution policy (older state tables from before 0.2.0 do not have it).
 state.lua = state.lua or { enabled = LUA_DEFAULT_ENABLED, maxMs = LUA_DEFAULT_MAX_MS, maxSteps = LUA_DEFAULT_MAX_STEPS, hookMode = LUA_DEFAULT_HOOK_MODE }
@@ -2450,6 +2451,9 @@ ops.ping = function(args)
     modules       = moduleSummary(),
     input         = inputSummary(),
     control       = controlSummary(),
+    show          = MCPX.showState(),
+    undo          = state.undo and { open = true, name = state.undo.name, commands = state.undo.commands } or { open = false },
+    changes       = state.changes and state.changes.installed and { latest = state.changes.seq, hooks = state.changes.count } or nil,
   }
 end
 
@@ -2746,10 +2750,233 @@ ops["control.recover"] = function(args)
   return r
 end
 
+-------------------------------------------------------------------------------
+-- Undo groups and show-data change tracking (0.46.0)
+-------------------------------------------------------------------------------
+-- Probe on onPC 2.5.1 (docs/probes/undo-and-hooks-macos-2.5.1.md):
+--   * CreateUndo(name) returns a handle; Cmd(c, undo) and CmdIndirect(c, undo) join it, and CloseUndo(undo)
+--     makes it one Oops step. A group closed before its CmdIndirect commands ran does not hold them (each is its
+--     own step then), so close waits a few frames when indirect commands joined. An empty group adds no step.
+--   * HookObjectChange(fn, obj, plugin) takes the Plugin object (its component answers nil) and allows one hook per
+--     callback function (a second hook with the same function answers -1), so every hook gets its own closure.
+--     change 10 = the object's children changed (store or delete in a pool, Store Cue in a sequence, a preset
+--     stored), 11 = the object itself changed (Label). Playback, programmer and selection fire nothing.
+-- MCPX (declared next to state, since ops.ping uses it) is one local so the main chunk stays below Lua's
+-- local-variable limit.
+
+-- Show-file state for ping (gma3_status): unsaved changes, the file status (ShowLoaded, ShowSaving, ...), CPU load.
+-- onPC 2.5.1 answers 0 for the temperature samples, so they are only reported when non-zero.
+function MCPX.showState()
+  local out = {}
+  local ok, need = pcall(NeedShowSave)
+  if ok and need ~= nil then out.saveNeeded = need == true end
+  local ok2, st = pcall(GetShowFileStatus)
+  if ok2 and st ~= nil then out.fileStatus = tostring(st) end
+  for key, sample in pairs({ cpu = "CPU", cpuTemp = "CPUTEMP", gpuTemp = "GPUTEMP" }) do
+    local ok3, v = pcall(GetSample, sample)
+    if ok3 and type(v) == "number" and (key == "cpu" or v > 0) then out[key] = v end
+  end
+  return out
+end
+
+do
+local function mcpxPlugin()
+  local p
+  if my_handle ~= nil then pcall(function() p = my_handle:Parent() end) end
+  if p == nil then pcall(function() p = DataPool().Plugins[pluginName or "gma3_mcp_bridge"] end) end
+  return p
+end
+
+-- The open group belongs to the connection that opened it; commands of other connections stay outside it.
+function MCPX.undoHandle()
+  local g = state.undo
+  if g and g.client == state.reqClient then return g end
+  return nil
+end
+
+function MCPX.cmd(command)
+  local g = MCPX.undoHandle()
+  if g then g.commands = g.commands + 1; return Cmd(command, g.handle) end
+  return Cmd(command)
+end
+
+function MCPX.indirect(command)
+  local g = MCPX.undoHandle()
+  if g then g.commands = g.commands + 1; g.indirect = true; return CmdIndirect(command, g.handle) end
+  return CmdIndirect(command)
+end
+
+-- wait: let queued CmdIndirect commands run first (not on disconnect or shutdown, where the frames have passed).
+function MCPX.closeUndo(reason, wait)
+  local g = state.undo
+  if not g then return nil end
+  state.undo = nil
+  if wait and g.indirect then for _ = 1, 3 do coroutine.yield(0.05) end end
+  local ok, r = pcall(CloseUndo, g.handle)
+  return { name = g.name, closed = ok and r ~= false, commands = g.commands, reason = reason, error = (not ok) and tostring(r) or nil }
+end
+
+ops["undo.open"] = function(args, ctx)
+  local name = args.name
+  if type(name) ~= "string" or name == "" then error("args.name (string) is required") end
+  name = name:sub(1, 60)
+  local replaced = state.undo and MCPX.closeUndo("replaced by a new group", true) or nil
+  local ok, h = pcall(CreateUndo, "MCP " .. name)
+  if not ok or h == nil then error("CreateUndo failed: " .. tostring(h)) end
+  state.undo = { handle = h, name = name, client = ctx and ctx.client, opened = now(), commands = 0, indirect = false }
+  return { open = true, name = name, replaced = replaced }
+end
+
+ops["undo.close"] = function(args, ctx)
+  local g = state.undo
+  if not g then return { closed = false, note = "no group was open" } end
+  if ctx and g.client ~= ctx.client then return { closed = false, note = "the open group belongs to another connection" } end
+  return MCPX.closeUndo("closed", true)
+end
+
+-- Change log: a ring of the last RING entries with increasing seq numbers; clients read it with changes.since
+-- or receive it pushed ({"event":"changes",...} lines without an id) after changes.watch.
+local CHANGE_RING, CHANGE_HOOKS_MAX = 256, 600
+local CHANGE_NAMES = { [10] = "children", [11] = "object" }
+
+local function changeState()
+  local ch = state.changes
+  if not ch then ch = { seq = 0, ring = {}, hooks = {}, count = 0, installed = false, pushed = 0, lastPush = 0 }; state.changes = ch end
+  return ch
+end
+
+local function recordChange(key, kind, obj, change)
+  local ch = changeState()
+  local name, no
+  pcall(function() name = obj.name; no = obj.no end)
+  local last = ch.ring[#ch.ring]
+  local t = now()
+  -- Coalesce a burst on one object (a batch of stores) into one entry with a count.
+  if last and last.key == key and last.change == change and t - last.t < 0.2 then
+    last.count = last.count + 1; last.t = t; ch.seq = ch.seq + 1; last.seq = ch.seq
+    return
+  end
+  ch.seq = ch.seq + 1
+  ch.ring[#ch.ring + 1] = { seq = ch.seq, key = key, kind = kind, name = name and tostring(name) or nil, no = no, change = change,
+                            what = CHANGE_NAMES[change] or tostring(change), count = 1, t = t }
+  if #ch.ring > CHANGE_RING then table.remove(ch.ring, 1) end
+  if kind == "pool" and key == "pool:Sequences" then ch.resync = true end
+end
+
+local function hookObject(key, kind, obj, plugin)
+  local ch = changeState()
+  if ch.hooks[key] or ch.count >= CHANGE_HOOKS_MAX or obj == nil then return end
+  local ok, id = pcall(HookObjectChange, function(o, change) recordChange(key, kind, o, change) end, obj, plugin)
+  if ok and id ~= nil and id ~= -1 then
+    ch.hooks[key] = { id = id, obj = obj }
+    ch.count = ch.count + 1
+  end
+end
+
+local function syncSequenceHooks(plugin)
+  local ch = changeState()
+  local seqs = DataPool().Sequences
+  local present = {}
+  for _, s in ipairs(seqs:Children()) do
+    local key = "sequence:" .. tostring(s.no)
+    present[key] = s
+    local h = ch.hooks[key]
+    if h and h.obj ~= s then pcall(Unhook, h.id); ch.hooks[key] = nil; ch.count = ch.count - 1 end
+    hookObject(key, "sequence", s, plugin)
+  end
+  for key, h in pairs(ch.hooks) do
+    if key:sub(1, 9) == "sequence:" and not present[key] then pcall(Unhook, h.id); ch.hooks[key] = nil; ch.count = ch.count - 1 end
+  end
+  ch.resync = false
+end
+
+function MCPX.installHooks()
+  local ch = changeState()
+  if ch.installed then return ch end
+  local plugin = mcpxPlugin()
+  if plugin == nil then error("[unsupported] the bridge cannot find its Plugin object to hook show changes") end
+  local dp = DataPool()
+  for _, pool in ipairs(dp:Children()) do hookObject("pool:" .. tostring(pool.name), "pool", pool, plugin) end
+  for _, pp in ipairs(dp.PresetPools:Children()) do hookObject("presets:" .. tostring(pp.no), "presetPool", pp, plugin) end
+  syncSequenceHooks(plugin)
+  ch.installed = true
+  ch.plugin = plugin
+  return ch
+end
+
+function MCPX.unhookAll()
+  local ch = state.changes
+  if not ch then return 0 end
+  local n = 0
+  for _, h in pairs(ch.hooks) do if pcall(Unhook, h.id) then n = n + 1 end end
+  state.changes = nil
+  return n
+end
+
+local function changeEntry(e)
+  return { seq = e.seq, kind = e.kind, key = e.key, name = e.name, no = e.no, what = e.what, change = e.change, count = e.count, t = e.t }
+end
+
+local function changesAfter(cursor, limit)
+  local ch = changeState()
+  local out = {}
+  local first = ch.ring[1]
+  for _, e in ipairs(ch.ring) do
+    if e.seq > cursor then
+      out[#out + 1] = changeEntry(e)
+      if #out >= limit then break end
+    end
+  end
+  local missed = first ~= nil and cursor > 0 and first.seq > cursor + 1 and cursor < ch.seq
+  return out, missed
+end
+
+ops["changes.since"] = function(args)
+  local ch = MCPX.installHooks()
+  local cursor = tonumber(args.cursor) or 0
+  local limit = math.max(1, math.min(tonumber(args.limit) or 200, CHANGE_RING))
+  local list, missed = changesAfter(cursor, limit)
+  return { instance = state.instance, cursor = (#list > 0 and list[#list].seq) or ch.seq, latest = ch.seq, changes = emptyArray(list), missed = missed, hooks = ch.count }
+end
+
+ops["changes.watch"] = function(args, ctx)
+  local ch = MCPX.installHooks()
+  if ctx and ctx.client then ctx.client.watchCursor = ch.seq end
+  return { instance = state.instance, watching = true, cursor = ch.seq, hooks = ch.count,
+           note = "show-data changes arrive as lines without an id: {\"event\":\"changes\",\"instance\":...,\"cursor\":n,\"changes\":[...]}; playback state is not hooked" }
+end
+
+ops["changes.unwatch"] = function(args, ctx)
+  if ctx and ctx.client then ctx.client.watchCursor = nil end
+  return { watching = false }
+end
+
+-- Once per frame from the server loop: resync sequence hooks after the pool changed, push new entries (at most
+-- every 0.1 s) to the connections that watch.
+function MCPX.serviceChanges(send)
+  local ch = state.changes
+  if not ch or not ch.installed then return end
+  if ch.resync then pcall(syncSequenceHooks, ch.plugin) end
+  if ch.seq == ch.pushed then return end
+  local t = now()
+  if t - ch.lastPush < 0.1 then return end
+  ch.lastPush = t
+  for _, cl in ipairs(state.clients) do
+    if cl.watchCursor ~= nil and cl.watchCursor < ch.seq then
+      local list, missed = changesAfter(cl.watchCursor, CHANGE_RING)
+      cl.watchCursor = ch.seq
+      send(cl, encode({ event = "changes", instance = state.instance, cursor = ch.seq, changes = emptyArray(list), missed = missed }))
+    end
+  end
+  ch.pushed = ch.seq
+end
+end
+state._mcpx = MCPX  -- exposed for local testing
+
 ops.cmd = function(args)
   local command = args.command or args.cmd
   if type(command) ~= "string" or command == "" then error("args.command (string) is required") end
-  local feedback = Cmd(command)
+  local feedback = MCPX.cmd(command)
   return { command = command, feedback = feedback }
 end
 
@@ -3842,8 +4069,8 @@ ops["patch.enter"] = function(args)
   if m then raise({ code = "modal-open", message = "a modal is open (" .. tostring(m.name) .. "); close it at the console first", modal = m }) end
   if args.target == "fixturetypes" then
     -- SU-03: the fixture-type pool of the copy, one level per ChangeDestination (a combined path does not land).
-    CmdIndirect('ChangeDestination "ShowData"."Patch"')
-    CmdIndirect('ChangeDestination "FixtureTypes"')
+    MCPX.indirect('ChangeDestination "ShowData"."Patch"')
+    MCPX.indirect('ChangeDestination "FixtureTypes"')
     return { queued = true, target = "fixturetypes", expectDestination = "FixtureTypes" }
   elseif args.target ~= nil and args.target ~= "stage" then
     raise("[bad-args] target must be stage (default) or fixturetypes")
@@ -3851,8 +4078,8 @@ ops["patch.enter"] = function(args)
   local stage = stageOf(ShowData().LivePatch, args.stage)
   local stageName = tostring(stage.name)
   if stageName:find('"') then raise("[bad-stage] the stage name contains a quote and cannot be addressed") end
-  CmdIndirect('ChangeDestination "ShowData"."Patch"')
-  CmdIndirect('ChangeDestination "Stages"."' .. stageName .. '"."Fixtures"')
+  MCPX.indirect('ChangeDestination "ShowData"."Patch"')
+  MCPX.indirect('ChangeDestination "Stages"."' .. stageName .. '"."Fixtures"')
   return { queued = true, stage = stageName, expectDestination = stageName .. ".Fixtures" }
 end
 
@@ -4055,7 +4282,7 @@ ops["patch.commit"] = function(args)
   requireCopy(nil)
   local m = patchModal()
   if m then raise({ code = "modal-open", message = "a modal is open (" .. tostring(m.name) .. "); nothing was committed", modal = m }) end
-  CmdIndirect("ChangeDestination Root")
+  MCPX.indirect("ChangeDestination Root")
   return { queued = true }
 end
 
@@ -5134,7 +5361,7 @@ do
     for _, t in ipairs(p.FixtureTypes:Children()) do no = math.max(no, tonumber(safeProp(t, "no")) or 0) end
     no = no + 1
     local command = 'Import ' .. no .. ' /File "' .. e.file .. '" /Path "' .. folder .. '"'
-    CmdIndirect(command)
+    MCPX.indirect(command)
     return { queued = true, command = command, source = e.source, file = e.file, verified = e.verified, typesBefore = before, attributesBefore = attrs }
   end
 
@@ -6061,7 +6288,7 @@ GUARDED_OPS["tags.protect"] = "a tag protection change"
     if open then raise("[modal-open] a dialog is open on the console; SaveShow was not sent") end
     local command = "SaveShow"
     if args.name ~= nil then command = 'SaveShow "' .. showName(args.name) .. '"' end
-    CmdIndirect(command)
+    MCPX.indirect(command)
     return { queued = true, command = command, now = os.time() }
   end
 
@@ -6117,7 +6344,7 @@ GUARDED_OPS["tags.protect"] = "a tag protection change"
     end
     if not file then raise("[no-file] " .. name .. ".show is not in the shows folder; LoadShow was not sent") end
     local command = 'LoadShow "' .. file .. '"'
-    CmdIndirect(command)
+    MCPX.indirect(command)
     return { queued = true, command = command, from = currentShow(), now = os.time() }
   end
   GUARDED_OPS["show.load"] = "a show load"
@@ -6395,7 +6622,7 @@ end)()
       if d == nil or d ~= addrOf(h) then raise("[wrong-destination] the command line is at " .. tostring(patchDestination()) .. ", not " .. what .. "; nothing was sent") end
     end
     local sent = {}
-    local function send(c) CmdIndirect(c); sent[#sent + 1] = c end
+    local function send(c) MCPX.indirect(c); sent[#sent + 1] = c end
     if args.step == "source" then
       expectAt(list, plan.stageName .. ".Fixtures")
       if plan.source then send("ChangeDestination " .. plan.source.index) end
@@ -7130,7 +7357,9 @@ local function handleLine(client, line)
       return errorReply(id, req.op, e)
     end
   end
+  state.reqClient = client  -- undo groups (0.46.0): commands join only their own connection's group
   local okR, result = xpcall(function() return op(args, ctx) end, debug.traceback)
+  state.reqClient = nil
   if okR then
     return encode({ id = id, ok = true, result = toJsonSafe(result) })
   end
@@ -7168,6 +7397,10 @@ local function closeClient(i, reason)
   local c = state.clients[i]
   if c then
     releaseClientSession(c, reason or "disconnect")
+    if state.undo and state.undo.client == c then
+      local r = MCPX.closeUndo(reason or "disconnect", false)
+      if r then log("undo group \"%s\" closed on %s (%d commands)", tostring(r.name), tostring(reason or "disconnect"), r.commands or 0) end
+    end
     pcall(function() c.sock:close() end)
   end
   table.remove(state.clients, i)
@@ -7266,11 +7499,15 @@ local function serverMain()
     end
 
     serviceClients()
+    MCPX.serviceChanges(function(cl, line) if not sendAll(cl.sock, line .. "\n") then cl.watchCursor = nil end end)
 
     coroutine.yield()
   end
 
   for i = #state.clients, 1, -1 do closeClient(i, "shutdown") end
+  MCPX.closeUndo("shutdown", false)
+  local unhooked = MCPX.unhookAll()
+  if unhooked > 0 then log("removed %d show-change hooks", unhooked) end
   pcall(function() server:close() end)
   state.server = nil
   state.running = false
@@ -7690,6 +7927,9 @@ local function MainImpl(display_handle, argument)
   -- 0.45.0: an identity per start, so a client can tell a restarted bridge from the one that was running (the state
   -- table lives in _G and is not trusted to be fresh after a show load).
   state.instance = string.format("%d-%d", os.time(), math.random(1, 1073741823))
+  -- 0.46.0: an undo group or change hooks left in _G by a run that did not stop cleanly belong to dead closures.
+  if state.undo then pcall(CloseUndo, state.undo.handle); state.undo = nil end
+  MCPX.unhookAll()
   state.stopRequested = false
   state.clients = {}
   loadModules()
